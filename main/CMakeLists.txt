@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "ripple_main.c"
         "led_indicator.c"
+        "battery_monitor.c"
         "imu_sensor.c"
         "wave_detector.c"
         "ble_ripple.c"
@@ -17,4 +18,5 @@ idf_component_register(
         app_update
         bootloader_support
         esp_partition
+        esp_adc
 )

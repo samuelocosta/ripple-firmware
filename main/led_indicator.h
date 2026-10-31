@@ -30,6 +30,13 @@ void led_indicator_set_mode(ripple_led_mode_t mode);
  */
 void led_indicator_set_ble_connected(bool connected);
 
+/**
+ * @brief Define se a bateria atingiu nível crítico (<= 15%).
+ *        Quando ativado, mantém o LED Vermelho estático ligado e o RGB vermelho sólido,
+ *        exceto se ocorrer FALL_ALERT (que tem prioridade máxima).
+ */
+void led_indicator_set_low_battery(bool is_low);
+
 #ifdef __cplusplus
 }
 #endif

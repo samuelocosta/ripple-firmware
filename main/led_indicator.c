@@ -12,6 +12,7 @@ static const char *TAG = "LED_IND";
 static led_strip_handle_t s_strip = NULL;
 static volatile ripple_led_mode_t s_current_mode = LED_MODE_CALIBRATING;
 static volatile bool s_ble_connected = false;
+static volatile bool s_low_battery = false;
 
 static void set_rgb(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -30,46 +31,55 @@ static void led_animation_task(void *arg)
     while (true) {
         ripple_led_mode_t mode = s_current_mode;
         bool ble_conn = s_ble_connected;
+        bool low_bat = s_low_battery;
 
-        switch (mode) {
-            case LED_MODE_CALIBRATING: {
-                // Azul pulsante rápido (a cada ~100ms alterna intensidade)
-                uint8_t blue = ((tick % 10) < 5) ? 120 : 15;
-                set_rgb(0, 10, blue);
-                gpio_set_level(BOARD_LED_RED_GPIO, (tick % 4 == 0) ? 1 : 0);
-                break;
+        // Emergency fall alert ALWAYS takes absolute priority over everything else
+        if (mode == LED_MODE_FALL_ALERT) {
+            // Estrobo de alta visibilidade Vermelho / Branco (10 Hz)
+            bool flash = (tick % 2) == 0;
+            if (flash) {
+                set_rgb(255, 0, 0);
+                gpio_set_level(BOARD_LED_RED_GPIO, 1);
+            } else {
+                set_rgb(180, 180, 180);
+                gpio_set_level(BOARD_LED_RED_GPIO, 0);
             }
-
-            case LED_MODE_MONITORING: {
-                // Efeito de respiração suave a cada ~2.5s (50 ticks de 50ms)
-                int phase = (int)(tick % 40);
-                int triangle = (phase < 20) ? phase : (40 - phase); // 0..20
-                uint8_t intensity = (uint8_t)(8 + triangle * 4);    // 8..88
-
-                if (ble_conn) {
-                    // Ciano/Verde-Água quando o notebook está conectado via BLE monitorando
-                    set_rgb(0, intensity, intensity / 2);
-                } else {
-                    // Verde puro quando monitorando autonomamente
-                    set_rgb(0, intensity, 0);
+        } else if (low_bat) {
+            // Low battery alert (<= 15%): Red LED constantly ON + RGB solid RED
+            set_rgb(255, 0, 0);
+            gpio_set_level(BOARD_LED_RED_GPIO, 1);
+        } else {
+            // Normal operating animations
+            switch (mode) {
+                case LED_MODE_CALIBRATING: {
+                    // Azul pulsante rápido (a cada ~100ms alterna intensidade)
+                    uint8_t blue = ((tick % 10) < 5) ? 120 : 15;
+                    set_rgb(0, 10, blue);
+                    gpio_set_level(BOARD_LED_RED_GPIO, (tick % 4 == 0) ? 1 : 0);
+                    break;
                 }
 
-                // Heartbeat discreto no LED vermelho a cada 3 segundos
-                gpio_set_level(BOARD_LED_RED_GPIO, (tick % 60 == 0) ? 1 : 0);
-                break;
-            }
+                case LED_MODE_MONITORING: {
+                    // Efeito de respiração suave a cada ~2.5s (50 ticks de 50ms)
+                    int phase = (int)(tick % 40);
+                    int triangle = (phase < 20) ? phase : (40 - phase); // 0..20
+                    uint8_t intensity = (uint8_t)(8 + triangle * 4);    // 8..88
 
-            case LED_MODE_FALL_ALERT: {
-                // Estrobo de alta visibilidade Vermelho / Branco (10 Hz)
-                bool flash = (tick % 2) == 0;
-                if (flash) {
-                    set_rgb(255, 0, 0);
-                    gpio_set_level(BOARD_LED_RED_GPIO, 1);
-                } else {
-                    set_rgb(180, 180, 180);
-                    gpio_set_level(BOARD_LED_RED_GPIO, 0);
+                    if (ble_conn) {
+                        // Ciano/Verde-Água quando o notebook está conectado via BLE monitorando
+                        set_rgb(0, intensity, intensity / 2);
+                    } else {
+                        // Verde puro quando monitorando autonomamente
+                        set_rgb(0, intensity, 0);
+                    }
+
+                    // Heartbeat discreto no LED vermelho a cada 3 segundos
+                    gpio_set_level(BOARD_LED_RED_GPIO, (tick % 60 == 0) ? 1 : 0);
+                    break;
                 }
-                break;
+
+                case LED_MODE_FALL_ALERT:
+                    break;
             }
         }
 
@@ -139,4 +149,9 @@ void led_indicator_set_mode(ripple_led_mode_t mode)
 void led_indicator_set_ble_connected(bool connected)
 {
     s_ble_connected = connected;
+}
+
+void led_indicator_set_low_battery(bool is_low)
+{
+    s_low_battery = is_low;
 }

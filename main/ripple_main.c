@@ -4,11 +4,13 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "board_pins.h"
 #include "led_indicator.h"
+#include "battery_monitor.h"
 #include "imu_sensor.h"
 #include "wave_detector.h"
 #include "ble_ripple.h"
@@ -27,20 +29,29 @@ static void send_status_report(const char *prefix_event)
     ripple_detector_status_t st = {0};
     wave_detector_get_status(&st);
 
-    char msg[192];
+    battery_status_t bat = {0};
+    battery_monitor_get_status(&bat);
+
+    char msg[240];
     if (prefix_event) {
         snprintf(msg, sizeof(msg),
-                 "{\"event\":\"%s\",\"state\":\"%s\",\"wave\":%.3f,\"peak\":%.3f,\"thr\":%.2f,\"alerts\":%lu,\"temp\":%.1f}\n",
+                 "{\"event\":\"%s\",\"state\":\"%s\",\"wave\":%.3f,\"peak\":%.3f,\"thr\":%.2f,\"alerts\":%lu,\"temp\":%.1f,"
+                 "\"vbat\":%.3f,\"bat_pct\":%.1f,\"bat_low\":%s,\"bat_crit\":%s}\n",
                  prefix_event,
                  wave_detector_state_str(st.state),
                  st.wave_energy,
                  st.peak_wave_energy,
                  st.threshold,
                  (unsigned long)st.alert_count,
-                 st.temperature_c);
+                 st.temperature_c,
+                 bat.voltage_v,
+                 bat.percentage,
+                 bat.is_low_battery ? "true" : "false",
+                 bat.is_critical ? "true" : "false");
     } else {
         snprintf(msg, sizeof(msg),
-                 "{\"state\":\"%s\",\"wave\":%.3f,\"peak\":%.3f,\"thr\":%.2f,\"da\":%.3f,\"gyro\":%.1f,\"alerts\":%lu,\"temp\":%.1f}\n",
+                 "{\"state\":\"%s\",\"wave\":%.3f,\"peak\":%.3f,\"thr\":%.2f,\"da\":%.3f,\"gyro\":%.1f,\"alerts\":%lu,\"temp\":%.1f,"
+                 "\"vbat\":%.3f,\"bat_pct\":%.1f,\"bat_low\":%s,\"bat_crit\":%s}\n",
                  wave_detector_state_str(st.state),
                  st.wave_energy,
                  st.peak_wave_energy,
@@ -48,7 +59,11 @@ static void send_status_report(const char *prefix_event)
                  st.delta_accel_g,
                  st.gyro_tilt_dps,
                  (unsigned long)st.alert_count,
-                 st.temperature_c);
+                 st.temperature_c,
+                 bat.voltage_v,
+                 bat.percentage,
+                 bat.is_low_battery ? "true" : "false",
+                 bat.is_critical ? "true" : "false");
     }
 
     printf("%s", msg);
@@ -125,8 +140,40 @@ static void handle_remote_command(const char *cmd)
     } else if (strcasecmp(cmd, "rollback") == 0) {
         ble_ripple_notify_text("{\"event\":\"initiating_rollback\"}\n");
         ota_manager_rollback();
+    } else if (strcasecmp(cmd, "battery") == 0 || strcasecmp(cmd, "bat") == 0) {
+        battery_status_t bat = {0};
+        battery_monitor_get_status(&bat);
+        char buf[176];
+        snprintf(buf, sizeof(buf),
+                 "{\"vbat\":%.3f,\"pct\":%.1f,\"min_v\":%.2f,\"low\":%s,\"crit\":%s,\"sensor_ok\":%s}\n",
+                 bat.voltage_v, bat.percentage, bat.min_safe_voltage_v,
+                 bat.is_low_battery ? "true" : "false",
+                 bat.is_critical ? "true" : "false",
+                 bat.sensor_ok ? "true" : "false");
+        printf("%s", buf);
+        ble_ripple_notify_text(buf);
+    } else if (strcasecmp(cmd, "sleep") == 0) {
+        ESP_LOGI(TAG, "Remote 'sleep' command received. Entering deep sleep...");
+        ble_ripple_notify_text("{\"event\":\"entering_deep_sleep\"}\n");
+        vTaskDelay(pdMS_TO_TICKS(150));
+        battery_monitor_enter_deep_sleep();
+    } else if (strncasecmp(cmd, "bat_min ", 8) == 0 || strncasecmp(cmd, "set_bat_min ", 12) == 0) {
+        const char *p = (cmd[0] == 's' || cmd[0] == 'S') ? (cmd + 12) : (cmd + 8);
+        float v = strtof(p, NULL);
+        if (v >= 2.80f && v <= 3.90f) {
+            battery_monitor_set_min_voltage(v);
+            battery_status_t bat = {0};
+            battery_monitor_get_status(&bat);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "{\"status\":\"ok\",\"min_v\":%.2f,\"pct\":%.1f}\n",
+                     bat.min_safe_voltage_v, bat.percentage);
+            printf("%s", buf);
+            ble_ripple_notify_text(buf);
+        } else {
+            ble_ripple_notify_text("{\"error\":\"invalid_min_voltage\",\"hint\":\"range 2.80 to 3.90V\"}\n");
+        }
     } else if (strcasecmp(cmd, "help") == 0) {
-        ble_ripple_notify_text("{\"cmds\":[\"status\",\"sens <val>\",\"test_alert\",\"rearm\",\"calibrate\",\"stream on/off\",\"log on/off\",\"ota info\",\"reboot\",\"rollback\"]}\n");
+        ble_ripple_notify_text("{\"cmds\":[\"status\",\"battery\",\"bat_min <val>\",\"sleep\",\"sens <val>\",\"test_alert\",\"rearm\",\"calibrate\",\"stream on/off\",\"log on/off\",\"ota info\",\"reboot\",\"rollback\"]}\n");
     } else {
         ble_ripple_notify_text("{\"error\":\"unknown_cmd\",\"hint\":\"send help\"}\n");
     }
@@ -143,6 +190,12 @@ void app_main(void)
     // 1. Inicializa subsistema de OTA e valida rollback seguro
     ESP_ERROR_CHECK(ota_manager_init());
 
+    // Check wakeup cause (Deep Sleep or normal power-on)
+    uint32_t wakeup_causes = esp_sleep_get_wakeup_causes();
+    if (wakeup_causes != 0) {
+        ESP_LOGW(TAG, "Buoy woke up from DEEP SLEEP! Wakeup bitmap: 0x%08" PRIx32, wakeup_causes);
+    }
+
     // 2. Inicializa o interceptor de logs sem fio via BLE
     ESP_ERROR_CHECK(ble_logger_init());
 
@@ -157,10 +210,16 @@ void app_main(void)
                  esp_err_to_name(imu_err));
     }
 
-    // 5. Inicializa algoritmo detector de quedas/oscilação (limiar inicial = 0.22)
+    // 5. Initialize battery monitoring subsystem (MAX17048 I2C / ADC)
+    esp_err_t bat_err = battery_monitor_init();
+    if (bat_err != ESP_OK) {
+        ESP_LOGW(TAG, "Battery monitor initialized with warning: %s", esp_err_to_name(bat_err));
+    }
+
+    // 6. Inicializa algoritmo detector de quedas/oscilação (limiar inicial = 0.22)
     wave_detector_init(0.22f);
 
-    // 6. Inicializa Bluetooth Dual-Mode (Pop-up FastPair/Apple + GATT NUS + OTA Service)
+    // 7. Inicializa Bluetooth Dual-Mode (Pop-up FastPair/Apple + GATT NUS + OTA Service)
     ESP_ERROR_CHECK(ble_ripple_init(handle_remote_command));
 
     // 7. Loop principal de amostragem a 50 Hz (20 ms)
@@ -169,10 +228,27 @@ void app_main(void)
 
     while (true) {
         const uint32_t t_ms = now_ms();
-        const bool read_bmp = (loop_count % 50) == 0; // Lê temperatura/pressão a 1 Hz
+        const bool read_slow_sensors = (loop_count % 50) == 0; // Lê temperatura e bateria a 1 Hz
 
         ripple_sensor_sample_t sample = {0};
-        imu_sensor_read(&sample, read_bmp);
+        imu_sensor_read(&sample, read_slow_sensors);
+
+        // Amostragem de tensão de bateria e atualização dos alertas visuais a 1 Hz
+        if (read_slow_sensors) {
+            battery_status_t bat_sample = {0};
+            battery_monitor_read(&bat_sample);
+            led_indicator_set_low_battery(bat_sample.is_low_battery);
+
+            // Deep Sleep protection: enter deep sleep on critical voltage (<= min_safe_v / 0%)
+            if (battery_monitor_is_critical(&bat_sample)) {
+                ESP_LOGE(TAG, "CRITICAL BATTERY LEVEL (%.3fV <= %.2fV). Entering Deep Sleep...",
+                         bat_sample.voltage_v, bat_sample.min_safe_voltage_v);
+                send_status_report("CRITICAL_BATTERY_SHUTDOWN");
+                ble_ripple_notify_text("{\"event\":\"CRITICAL_BATTERY_SHUTDOWN\",\"msg\":\"Entering deep sleep\"}\n");
+                vTaskDelay(pdMS_TO_TICKS(200));
+                battery_monitor_enter_deep_sleep();
+            }
+        }
 
         // Caso o IMU esteja indisponível, simula 1.0g para permitir concluir a calibração e testar via BLE
         if (!sample.imu_ok) {
@@ -206,11 +282,13 @@ void app_main(void)
 
         // Log no console serial USB / BLE a cada 2 segundos (100 loops)
         if (loop_count % 100 == 0) {
-            ESP_LOGI(TAG, "[%s] Wave=%.3f (Peak=%.3f / Thr=%.2f) | Acc=(%.2f,%.2f,%.2f)g | GyroTilt=%.1fdps | Temp=%.1fC | Alerts=%lu",
+            battery_status_t bat_log = {0};
+            battery_monitor_get_status(&bat_log);
+            ESP_LOGI(TAG, "[%s] Wave=%.3f (Peak=%.3f / Thr=%.2f) | Acc=(%.2f,%.2f,%.2f)g | Temp=%.1fC | Bat=%.2fV (%.0f%%) | Alerts=%lu",
                      wave_detector_state_str(st.state),
                      st.wave_energy, st.peak_wave_energy, st.threshold,
                      sample.ax, sample.ay, sample.az,
-                     st.gyro_tilt_dps, st.temperature_c,
+                     st.temperature_c, bat_log.voltage_v, bat_log.percentage,
                      (unsigned long)st.alert_count);
         }
 
