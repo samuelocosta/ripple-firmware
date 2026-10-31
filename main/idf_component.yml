@@ -1,0 +1,7 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf:
+    version: '>=5.0.0'
+  esp-idf-lib/bmp280: "1.0.7"
+  esp-idf-lib/qmi8658c: "0.5.7"
+  espressif/led_strip: "3.0.3"

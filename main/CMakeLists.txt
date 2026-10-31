@@ -1,0 +1,20 @@
+idf_component_register(
+    SRCS
+        "ripple_main.c"
+        "led_indicator.c"
+        "imu_sensor.c"
+        "wave_detector.c"
+        "ble_ripple.c"
+        "ota_manager.c"
+        "ble_logger.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        driver
+        esp_timer
+        nvs_flash
+        bt
+        app_update
+        bootloader_support
+        esp_partition
+)
