@@ -16,7 +16,6 @@ extern "C" {
 
 typedef enum {
     BATTERY_BACKEND_NONE = 0,
-    BATTERY_BACKEND_MAX17048,  // I2C Fuel Gauge (address 0x36)
     BATTERY_BACKEND_ADC,        // ESP32-S3 ADC channel with voltage divider
 } battery_backend_t;
 
@@ -31,8 +30,8 @@ typedef struct {
 } battery_status_t;
 
 /**
- * @brief Initializes battery monitoring subsystem.
- *        Scans I2C bus for MAX17048 (0x36); if not present, falls back to ADC1.
+ * @brief Initializes battery monitoring subsystem via ESP32-S3 ADC1.
+ *        Uses calibrated curve fitting on the onboard resistor divider.
  *        Loads configured minimum safe voltage from NVS.
  */
 esp_err_t battery_monitor_init(void);

@@ -63,6 +63,8 @@ bool wave_detector_update(const ripple_sensor_sample_t *sample, uint32_t now_ms)
     }
 
     s_status.temperature_c = sample->temperature_c;
+    s_status.humidity_pct = sample->humidity_pct;
+    s_status.humidity_ok = sample->humidity_ok;
 
     if (!sample->imu_ok) {
         return false;

@@ -16,8 +16,10 @@ static i2c_dev_t s_qmi_dev = {0};
 static bmp280_t s_bmp_dev = {0};
 static bool s_imu_ready = false;
 static bool s_bmp_ready = false;
+static bool s_humidity_supported = false;
 static float s_last_temp_c = 25.0f;
 static float s_last_press_hpa = 1013.25f;
+static float s_last_humidity_pct = 50.0f;
 
 static bool try_init_qmi8658(uint8_t addr, gpio_num_t sda, gpio_num_t scl)
 {
@@ -67,7 +69,13 @@ static bool try_init_bmp280(uint8_t addr, gpio_num_t sda, gpio_num_t scl)
         return false;
     }
 
-    ESP_LOGI(TAG, "BMP280 detectado em 0x%02X (SDA=%d, SCL=%d)", addr, sda, scl);
+    if (s_bmp_dev.id == BME280_CHIP_ID) {
+        s_humidity_supported = true;
+        ESP_LOGI(TAG, "BME280 detectado em 0x%02X (sensor de umidade e pressao ativo)", addr);
+    } else {
+        s_humidity_supported = false;
+        ESP_LOGI(TAG, "BMP280 detectado em 0x%02X (SDA=%d, SCL=%d)", addr, sda, scl);
+    }
     return true;
 }
 
@@ -129,8 +137,10 @@ esp_err_t imu_sensor_read(ripple_sensor_sample_t *out, bool read_env)
     memset(out, 0, sizeof(*out));
     out->imu_ok = false;
     out->bmp_ok = s_bmp_ready;
+    out->humidity_ok = s_humidity_supported;
     out->temperature_c = s_last_temp_c;
     out->pressure_hpa = s_last_press_hpa;
+    out->humidity_pct = s_last_humidity_pct;
 
     if (s_imu_ready) {
         qmi8658c_data_t raw = {0};
@@ -152,11 +162,17 @@ esp_err_t imu_sensor_read(ripple_sensor_sample_t *out, bool read_env)
     if (read_env && s_bmp_ready) {
         float temp = 0.0f;
         float press_pa = 0.0f;
-        if (bmp280_read_float(&s_bmp_dev, &temp, &press_pa, NULL) == ESP_OK) {
+        float hum = 0.0f;
+        if (bmp280_read_float(&s_bmp_dev, &temp, &press_pa, s_humidity_supported ? &hum : NULL) == ESP_OK) {
             s_last_temp_c = temp;
             s_last_press_hpa = press_pa / 100.0f;
             out->temperature_c = s_last_temp_c;
             out->pressure_hpa = s_last_press_hpa;
+            if (s_humidity_supported) {
+                s_last_humidity_pct = hum;
+                out->humidity_pct = hum;
+                out->humidity_ok = true;
+            }
         }
     }
 

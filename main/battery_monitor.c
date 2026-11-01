@@ -13,7 +13,6 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "nvs.h"
-#include "i2cdev.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
@@ -23,14 +22,6 @@ static const char *TAG = "BATTERY_MON";
 #define NVS_NAMESPACE_BATTERY   "ripple_bat"
 #define NVS_KEY_MIN_VOLTAGE     "vbat_min"
 
-/* MAX17048 Registers */
-#define MAX17048_REG_VCELL      0x02  // 16-bit cell voltage (78.125 uV/LSB)
-#define MAX17048_REG_SOC        0x04  // 16-bit SoC
-#define MAX17048_REG_VERSION    0x08  // 16-bit production version
-#define MAX17048_REG_CONFIG     0x0C  // 16-bit configuration
-#define MAX17048_REG_CMD        0xFE  // Command register (0x5400 = soft reset)
-
-static i2c_dev_t s_max_dev = {0};
 static battery_status_t s_status = {
     .voltage_v = 0.0f,
     .percentage = 0.0f,
@@ -42,7 +33,7 @@ static battery_status_t s_status = {
 };
 static uint8_t s_critical_samples = 0;
 
-/* ADC fallback handles */
+/* ADC handles */
 static adc_oneshot_unit_handle_t s_adc_handle = NULL;
 static adc_cali_handle_t s_adc_cali_handle = NULL;
 static bool s_adc_calibrated = false;
@@ -86,70 +77,7 @@ static esp_err_t save_nvs_min_voltage(float val)
     return err;
 }
 
-static void scan_i2c_bus(void)
-{
-    ESP_LOGI(TAG, "Scanning I2C bus (SDA=%d, SCL=%d)...", BOARD_I2C_SDA_GPIO, BOARD_I2C_SCL_GPIO);
-    int found = 0;
-    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-        i2c_dev_t test_dev = {0};
-        if (i2c_dev_create_mutex(&test_dev) != ESP_OK) {
-            continue;
-        }
-        test_dev.port = BOARD_I2C_PORT;
-        test_dev.addr = addr;
-        test_dev.cfg.sda_io_num = BOARD_I2C_SDA_GPIO;
-        test_dev.cfg.scl_io_num = BOARD_I2C_SCL_GPIO;
-        test_dev.cfg.master.clk_speed = 100000;
-
-        uint8_t dummy = 0;
-        esp_err_t err = i2c_dev_read(&test_dev, NULL, 0, &dummy, 1);
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "  -> Found I2C device at 0x%02X", addr);
-            found++;
-        }
-        i2c_dev_delete_mutex(&test_dev);
-    }
-    ESP_LOGI(TAG, "I2C scan complete. %d device(s) found.", found);
-}
-
-static bool try_init_max17048(void)
-{
-    memset(&s_max_dev, 0, sizeof(s_max_dev));
-    s_max_dev.port = BOARD_I2C_PORT;
-    s_max_dev.addr = BOARD_BATTERY_I2C_ADDR;
-    s_max_dev.cfg.sda_io_num = BOARD_I2C_SDA_GPIO;
-    s_max_dev.cfg.scl_io_num = BOARD_I2C_SCL_GPIO;
-    s_max_dev.cfg.master.clk_speed = BOARD_I2C_FREQ_HZ;
-
-    if (i2c_dev_create_mutex(&s_max_dev) != ESP_OK) {
-        return false;
-    }
-
-    // Try reading register 0x02 (VCELL - 2 bytes)
-    uint8_t reg = MAX17048_REG_VCELL;
-    uint8_t buf[2] = {0};
-    esp_err_t err = i2c_dev_read(&s_max_dev, &reg, 1, buf, sizeof(buf));
-    if (err != ESP_OK) {
-        i2c_dev_delete_mutex(&s_max_dev);
-        return false;
-    }
-
-    uint16_t raw_vcell = ((uint16_t)buf[0] << 8) | buf[1];
-    float test_volts = (float)raw_vcell * 78.125e-6f;
-
-    // Plausibility check for single-cell LiPo: 2.0V .. 5.0V
-    if (test_volts < 2.0f || test_volts > 5.0f) {
-        ESP_LOGW(TAG, "MAX17048 responded with implausible voltage: %.3fV", test_volts);
-        i2c_dev_delete_mutex(&s_max_dev);
-        return false;
-    }
-
-    ESP_LOGI(TAG, "MAX17048 Fuel Gauge detected on I2C 0x%02X! Initial VCELL=%.3fV",
-             BOARD_BATTERY_I2C_ADDR, test_volts);
-    return true;
-}
-
-static bool try_init_adc(void)
+static bool init_adc(void)
 {
     adc_oneshot_unit_init_cfg_t init_config = {
         .unit_id = ADC_UNIT_1,
@@ -188,7 +116,7 @@ static bool try_init_adc(void)
         ESP_LOGW(TAG, "ADC calibration not available; raw conversion will be used");
     }
 
-    ESP_LOGI(TAG, "ADC1 fallback initialized on Channel %d (Divider Ratio: %.1f)",
+    ESP_LOGI(TAG, "ADC1 initialized on Channel %d (Divider Ratio: %.1f)",
              BOARD_BATTERY_ADC_CHANNEL, BOARD_BATTERY_DIVIDER_RATIO);
     return true;
 }
@@ -211,24 +139,14 @@ esp_err_t battery_monitor_init(void)
 {
     load_nvs_min_voltage();
 
-    // Scan bus and log discovered I2C addresses
-    scan_i2c_bus();
-
-    // 1. Try MAX17048 I2C fuel gauge
-    if (try_init_max17048()) {
-        s_status.backend = BATTERY_BACKEND_MAX17048;
+    if (init_adc()) {
+        s_status.backend = BATTERY_BACKEND_ADC;
         s_status.sensor_ok = true;
     } else {
-        ESP_LOGW(TAG, "MAX17048 not detected at 0x%02X, falling back to ADC1...", BOARD_BATTERY_I2C_ADDR);
-        if (try_init_adc()) {
-            s_status.backend = BATTERY_BACKEND_ADC;
-            s_status.sensor_ok = true;
-        } else {
-            s_status.backend = BATTERY_BACKEND_NONE;
-            s_status.sensor_ok = false;
-            ESP_LOGE(TAG, "No battery monitoring backend available!");
-            return ESP_FAIL;
-        }
+        s_status.backend = BATTERY_BACKEND_NONE;
+        s_status.sensor_ok = false;
+        ESP_LOGE(TAG, "Failed to initialize ADC battery monitor!");
+        return ESP_FAIL;
     }
 
     // Initial read
@@ -241,18 +159,7 @@ esp_err_t battery_monitor_read(battery_status_t *out_status)
     float voltage = 0.0f;
     bool success = false;
 
-    if (s_status.backend == BATTERY_BACKEND_MAX17048) {
-        uint8_t reg = MAX17048_REG_VCELL;
-        uint8_t buf[2] = {0};
-        esp_err_t err = i2c_dev_read(&s_max_dev, &reg, 1, buf, sizeof(buf));
-        if (err == ESP_OK) {
-            uint16_t raw_vcell = ((uint16_t)buf[0] << 8) | buf[1];
-            voltage = (float)raw_vcell * 78.125e-6f;
-            success = true;
-        } else {
-            ESP_LOGW(TAG, "Failed to read MAX17048: %s", esp_err_to_name(err));
-        }
-    } else if (s_status.backend == BATTERY_BACKEND_ADC) {
+    if (s_status.backend == BATTERY_BACKEND_ADC && s_adc_handle != NULL) {
         int raw_adc = 0;
         esp_err_t err = adc_oneshot_read(s_adc_handle, BOARD_BATTERY_ADC_CHANNEL, &raw_adc);
         if (err == ESP_OK) {
@@ -264,6 +171,8 @@ esp_err_t battery_monitor_read(battery_status_t *out_status)
             }
             voltage = ((float)pin_mv / 1000.0f) * BOARD_BATTERY_DIVIDER_RATIO;
             success = true;
+        } else {
+            ESP_LOGW(TAG, "Failed to read ADC channel: %s", esp_err_to_name(err));
         }
     }
 

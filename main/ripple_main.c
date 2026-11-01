@@ -19,6 +19,8 @@
 
 static const char *TAG = "RIPPLE_MAIN";
 
+static uint32_t s_stream_interval_loops = 10; // Padrão: 10 loops de 20ms = 200ms = 5 Hz (1 a 50 loops)
+
 static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
@@ -32,10 +34,10 @@ static void send_status_report(const char *prefix_event)
     battery_status_t bat = {0};
     battery_monitor_get_status(&bat);
 
-    char msg[240];
+    char msg[280];
     if (prefix_event) {
         snprintf(msg, sizeof(msg),
-                 "{\"event\":\"%s\",\"state\":\"%s\",\"wave\":%.3f,\"peak\":%.3f,\"thr\":%.2f,\"alerts\":%lu,\"temp\":%.1f,"
+                 "{\"event\":\"%s\",\"state\":\"%s\",\"wave\":%.3f,\"peak\":%.3f,\"thr\":%.2f,\"alerts\":%lu,\"temp\":%.1f,\"hum\":%.1f,\"hum_ok\":%s,"
                  "\"vbat\":%.3f,\"bat_pct\":%.1f,\"bat_low\":%s,\"bat_crit\":%s}\n",
                  prefix_event,
                  wave_detector_state_str(st.state),
@@ -44,13 +46,15 @@ static void send_status_report(const char *prefix_event)
                  st.threshold,
                  (unsigned long)st.alert_count,
                  st.temperature_c,
+                 st.humidity_pct,
+                 st.humidity_ok ? "true" : "false",
                  bat.voltage_v,
                  bat.percentage,
                  bat.is_low_battery ? "true" : "false",
                  bat.is_critical ? "true" : "false");
     } else {
         snprintf(msg, sizeof(msg),
-                 "{\"state\":\"%s\",\"wave\":%.3f,\"peak\":%.3f,\"thr\":%.2f,\"da\":%.3f,\"gyro\":%.1f,\"alerts\":%lu,\"temp\":%.1f,"
+                 "{\"state\":\"%s\",\"wave\":%.3f,\"peak\":%.3f,\"thr\":%.2f,\"da\":%.3f,\"gyro\":%.1f,\"alerts\":%lu,\"temp\":%.1f,\"hum\":%.1f,\"hum_ok\":%s,"
                  "\"vbat\":%.3f,\"bat_pct\":%.1f,\"bat_low\":%s,\"bat_crit\":%s}\n",
                  wave_detector_state_str(st.state),
                  st.wave_energy,
@@ -60,6 +64,8 @@ static void send_status_report(const char *prefix_event)
                  st.gyro_tilt_dps,
                  (unsigned long)st.alert_count,
                  st.temperature_c,
+                 st.humidity_pct,
+                 st.humidity_ok ? "true" : "false",
                  bat.voltage_v,
                  bat.percentage,
                  bat.is_low_battery ? "true" : "false",
@@ -118,12 +124,38 @@ static void handle_remote_command(const char *cmd)
         wave_detector_start_calibration(t_ms);
         sync_outputs_with_state(RIPPLE_STATE_CALIBRATING);
         send_status_report("CALIBRATING_STARTED");
-    } else if (strcasecmp(cmd, "stream on") == 0) {
-        ble_ripple_set_streaming(true);
-        ble_ripple_notify_text("{\"stream\":true}\n");
-    } else if (strcasecmp(cmd, "stream off") == 0) {
-        ble_ripple_set_streaming(false);
-        ble_ripple_notify_text("{\"stream\":false}\n");
+    } else if (strncasecmp(cmd, "stream", 6) == 0) {
+        const char *arg = cmd + 6;
+        while (*arg == ' ') arg++;
+        if (strcasecmp(arg, "off") == 0) {
+            ble_ripple_set_streaming(false);
+            ble_ripple_notify_text("{\"stream\":false}\n");
+        } else {
+            uint32_t target_hz = 0;
+            if (strncasecmp(arg, "on", 2) == 0) {
+                arg += 2;
+                while (*arg == ' ') arg++;
+            }
+            if (*arg != '\0') {
+                target_hz = (uint32_t)strtoul(arg, NULL, 10);
+            }
+            if (target_hz == 0) {
+                if (s_stream_interval_loops == 0) {
+                    s_stream_interval_loops = 10;
+                }
+            } else {
+                if (target_hz < 1) target_hz = 1;
+                if (target_hz > 50) target_hz = 50; // Limite físico máximo: loop IMU de 50 Hz
+                s_stream_interval_loops = 50 / target_hz;
+                if (s_stream_interval_loops < 1) s_stream_interval_loops = 1;
+            }
+            ble_ripple_set_streaming(true);
+            uint32_t eff_hz = 50 / s_stream_interval_loops;
+            char resp[80];
+            snprintf(resp, sizeof(resp), "{\"stream\":true,\"hz\":%lu,\"interval_ms\":%lu}\n",
+                     (unsigned long)eff_hz, (unsigned long)(s_stream_interval_loops * 20));
+            ble_ripple_notify_text(resp);
+        }
     } else if (strcasecmp(cmd, "log on") == 0) {
         ble_logger_set_enabled(true);
         ble_ripple_notify_text("{\"log_stream\":true}\n");
@@ -210,7 +242,7 @@ void app_main(void)
                  esp_err_to_name(imu_err));
     }
 
-    // 5. Initialize battery monitoring subsystem (MAX17048 I2C / ADC)
+    // 5. Initialize battery monitoring subsystem (ADC1 voltage divider)
     esp_err_t bat_err = battery_monitor_init();
     if (bat_err != ESP_OK) {
         ESP_LOGW(TAG, "Battery monitor initialized with warning: %s", esp_err_to_name(bat_err));
@@ -228,26 +260,24 @@ void app_main(void)
 
     while (true) {
         const uint32_t t_ms = now_ms();
-        const bool read_slow_sensors = (loop_count % 50) == 0; // Lê temperatura e bateria a 1 Hz
+        const bool read_slow_sensors = (loop_count % 50) == 0; // Lê temperatura a 1 Hz
 
         ripple_sensor_sample_t sample = {0};
         imu_sensor_read(&sample, read_slow_sensors);
 
-        // Amostragem de tensão de bateria e atualização dos alertas visuais a 1 Hz
-        if (read_slow_sensors) {
-            battery_status_t bat_sample = {0};
-            battery_monitor_read(&bat_sample);
-            led_indicator_set_low_battery(bat_sample.is_low_battery);
+        // Amostragem de tensão de bateria a 50 Hz com filtro IIR 80/20 contra ruído
+        battery_status_t bat_sample = {0};
+        battery_monitor_read(&bat_sample);
+        led_indicator_set_low_battery(bat_sample.is_low_battery);
 
-            // Deep Sleep protection: enter deep sleep on critical voltage (<= min_safe_v / 0%)
-            if (battery_monitor_is_critical(&bat_sample)) {
-                ESP_LOGE(TAG, "CRITICAL BATTERY LEVEL (%.3fV <= %.2fV). Entering Deep Sleep...",
-                         bat_sample.voltage_v, bat_sample.min_safe_voltage_v);
-                send_status_report("CRITICAL_BATTERY_SHUTDOWN");
-                ble_ripple_notify_text("{\"event\":\"CRITICAL_BATTERY_SHUTDOWN\",\"msg\":\"Entering deep sleep\"}\n");
-                vTaskDelay(pdMS_TO_TICKS(200));
-                battery_monitor_enter_deep_sleep();
-            }
+        // Deep Sleep protection: enter deep sleep on critical voltage (<= min_safe_v / 0%)
+        if (battery_monitor_is_critical(&bat_sample)) {
+            ESP_LOGE(TAG, "CRITICAL BATTERY LEVEL (%.3fV <= %.2fV). Entering Deep Sleep...",
+                     bat_sample.voltage_v, bat_sample.min_safe_voltage_v);
+            send_status_report("CRITICAL_BATTERY_SHUTDOWN");
+            ble_ripple_notify_text("{\"event\":\"CRITICAL_BATTERY_SHUTDOWN\",\"msg\":\"Entering deep sleep\"}\n");
+            vTaskDelay(pdMS_TO_TICKS(200));
+            battery_monitor_enter_deep_sleep();
         }
 
         // Caso o IMU esteja indisponível, simula 1.0g para permitir concluir a calibração e testar via BLE
@@ -275,8 +305,8 @@ void app_main(void)
             }
         }
 
-        // Se o stream BLE estiver ativo, envia telemetria a 5 Hz (a cada 10 loops de 20ms = 200ms)
-        if (ble_ripple_is_connected() && ble_ripple_is_streaming() && (loop_count % 10 == 0)) {
+        // Se o stream BLE estiver ativo, envia telemetria na taxa configurada (1 Hz a 50 Hz)
+        if (ble_ripple_is_connected() && ble_ripple_is_streaming() && (loop_count % s_stream_interval_loops == 0)) {
             send_status_report(NULL);
         }
 

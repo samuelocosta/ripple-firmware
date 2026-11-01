@@ -25,6 +25,8 @@ typedef struct {
     float threshold;         // Limiar atual de disparo (ajustável via BLE)
     uint32_t alert_count;    // Total de alertas disparados desde o boot
     float temperature_c;
+    float humidity_pct;
+    bool humidity_ok;
 } ripple_detector_status_t;
 
 /**

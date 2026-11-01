@@ -31,9 +31,8 @@
 #define BOARD_LED_RED_GPIO          GPIO_NUM_13  // LED Vermelho simples (D13)
 #define BOARD_NEOPIXEL_GPIO         GPIO_NUM_33  // LED RGB Endereçável WS2812 (1 pixel)
 
-/* --- Monitoramento de Bateria --- */
-#define BOARD_BATTERY_I2C_ADDR      0x36         // MAX17048 I2C Fuel Gauge (padrão Feather TFT)
-#define BOARD_BATTERY_ADC_CHANNEL   ADC_CHANNEL_3 // GPIO 4 (A4) fallback analógico
+/* --- Monitoramento de Bateria (Divisor Resistivo Onboard) --- */
+#define BOARD_BATTERY_ADC_CHANNEL   ADC_CHANNEL_3 // GPIO 4 (A4) analógico
 #define BOARD_BATTERY_DIVIDER_RATIO 2.0f         // Razão do divisor de tensão (100k/100k = x2.0)
 
 /* --- Botão Onboard (Apenas referência / bancada) --- */

@@ -17,8 +17,10 @@ typedef struct {
     float gz;            // Giroscópio Z (deg/s)
     float temperature_c; // Temperatura (BMP280 ou QMI8658C)
     float pressure_hpa;  // Pressão barométrica (hPa, se BMP280 presente)
+    float humidity_pct;  // Umidade relativa (% se BME280 presente)
     bool imu_ok;
     bool bmp_ok;
+    bool humidity_ok;
 } ripple_sensor_sample_t;
 
 /**
