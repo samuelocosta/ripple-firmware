@@ -10,7 +10,7 @@ O **Ripple** é um dispositivo inteligente embarcado projetado para ficar flutua
 
 ### Premissas de Engenharia
 - **100% Selado e Sem Fios:** O hardware fica hermeticamente vedado dentro do corpo da boia com alimentação por bateria LiPo. Não há conectores USB ou botões acessíveis após a montagem.
-- **Monitoramento Inteligente de Bateria:** Mede a tensão da célula em tempo real com calibração precisa (suporte ao medidor I2C MAX17048 em `0x36` e fallback analógico ADC1). Permite configurar remotamente a tensão mínima segura com persistência na NVS. Quando a carga atinge $\le 15\%$, aciona alerta visual contínuo (LED vermelho estático e RGB em vermelho sólido), mantendo prioridade absoluta para alertas de emergência caso ocorra uma queda.
+- **Monitoramento Inteligente de Bateria:** Mede a tensão da célula em tempo real com calibração precisa via divisor de tensão onboard no ADC1 (Canal 3 / GPIO 4 com ajuste por curva de eFuse). Permite configurar remotamente a tensão mínima segura com persistência na NVS. Quando a carga atinge $\le 15\%$, aciona alerta visual contínuo (LED vermelho estático e RGB em vermelho sólido), mantendo prioridade absoluta para alertas de emergência caso ocorra uma queda.
 - **Proteção da Bateria via Deep Sleep (Corte a 0%):** Se a tensão cair até ou abaixo da tensão mínima segura configurada ($V \le V_{\text{min}}$, carga = 0%), a boia desliga imediatamente todos os periféricos (sensores I2C, NeoPixel, display e LEDs) e entra em modo de **Deep Sleep** para reduzir o consumo a microamperes, protegendo a química da bateria LiPo contra danos irreversíveis. O microcontrolador arma o despertar periódico (timer RTC de 1 hora para verificar se foi recarregada) e despertar pelo botão BOOT (GPIO 0).
 - **Detecção Inercial de Ondas (IMU 6-Eixos):** O sensor inercial onboard mede oscilações bruscas de inclinação e aceleração ($\Delta g$ e velocidade angular) provocadas pelo impacto e ondas na água.
 - **Alertas Instantâneos Sem Aplicativo:** Ao detectar uma queda, a boia dispara pacotes *Raw BLE Advertisement* multiplexando payloads de **Apple Continuity Proximity Pairing**, **Google Fast Pair** e **Samsung Galaxy**, disparando pop-ups e notificações nativas na tela de smartphones próximos sem exigir aplicativo instalado.
@@ -32,7 +32,7 @@ O **Ripple** é um dispositivo inteligente embarcado projetado para ficar flutua
 | **`I2C_SCL`** | **GPIO 41** | Linha de clock I2C |
 | **`QMI8658C`** | **`0x6B` (I2C)** | IMU 6-Eixos: Acelerômetro ($\pm 4g$) + Giroscópio ($\pm 512^\circ/\text{s}$) |
 | **`BMP280`** | **`0x77` (I2C)** | Sensor de temperatura interna e pressão barométrica |
-| **`MAX17048`** | **`0x36` (I2C)** | Medidor de bateria Fuel Gauge (com fallback para ADC1 Ch3 / GPIO 4) |
+| **`Bateria (Divisor)`** | **ADC1 Ch3 (GPIO 4)** | Monitoramento de tensão LiPo com calibração por curva e divisor 100k/100k |
 | **`WS2812 RGB`** | **GPIO 33** | LED endereçável de feedback de status (Vermelho sólido em bateria <= 15%) |
 | **`LED Vermelho`** | **GPIO 13** | Indicador visual de alerta (Aceso estático em bateria <= 15%) |
 
@@ -98,12 +98,33 @@ python tools/ripple_bt_cli.py help
 
 ---
 
-#### 1. Escanear a Boia (`scan`)
-Procura anúncios BLE emitidos pela boia e exibe endereço MAC, RSSI (potência de sinal) e Manufacturer Data:
+#### 1. Escanear e Conectar Boias (`scan`, `connect`, `disconnect`)
+Gerenciamento inteligente de conexão BLE persistente:
 ```bash
+# Escanear boias disponíveis no alcance
 python tools/ripple_bt_cli.py scan
+
+# Conectar a uma boia específica por índice ou endereço MAC
+python tools/ripple_bt_cli.py connect 1
+python tools/ripple_bt_cli.py connect C4:D8:D5:12:34:56
+
+# Desconectar da boia ativa
+python tools/ripple_bt_cli.py disconnect
 ```
-*Opções:* `-t, --timeout <segundos>` (padrão: 6.0s)
+- **Parâmetro Direto de Alvo (`--mac` / `-m`):** Permite direcionar comandos diretamente para uma boia específica pelo endereço MAC ou nome, sem passar por auto-descoberta nem depender de prompts interativos (ideal para scripts de automação e agentes):
+  ```bash
+  python tools/ripple_bt_cli.py --mac 3C:0F:02:DF:EB:82 battery
+  python tools/ripple_bt_cli.py -m 3C:0F:02:DF:EB:82 ota-info
+  python tools/ripple_bt_cli.py -m 3C:0F:02:DF:EB:82 cmd status
+  python tools/ripple_bt_cli.py --mac 3C:0F:02:DF:EB:82 dashboard
+  ```
+- **Conexão Persistente:** No modo interativo (shell), uma vez conectado à boia, a conexão é mantida ativa para todos os comandos subsequentes (`battery`, `status`, `dashboard`, `sens`, `rearm`), sem precisar escanear ou reconectar a cada ação.
+- **Auto-Descoberta Inteligente:** Se um comando for executado sem conexão ativa:
+  - Se apenas 1 boia estiver no alcance: conecta automaticamente e executa o comando.
+  - Se mais de uma boia for detectada:
+    - *Modo interativo (TTY):* lista as opções numeradas e solicita a seleção do usuário.
+    - *Modo não-interativo / automação:* lista as boias detectadas e orienta a usar `--mac <address>` para evitar bloqueio.
+  - Se nenhuma boia for encontrada ou a conexão cair: exibe erro amigável e sugere rodar `scan` e `connect`.
 
 ---
 
@@ -179,7 +200,7 @@ python tools/ripple_bt_cli.py logs
 ---
 
 #### 7. Monitoramento de Telemetria Contínua (`monitor`)
-Ativa o stream contínuo de energia das ondas, inclinação, temperatura e bateria a 5 Hz:
+Ativa o stream contínuo de energia das ondas, inclinação, temperatura e bateria em formato texto a 5 Hz (mantido 100% retrocompatível):
 ```bash
 python tools/ripple_bt_cli.py monitor
 ```
@@ -187,7 +208,49 @@ python tools/ripple_bt_cli.py monitor
 
 ---
 
-#### 8. Envio de Comandos e Calibração (`cmd`)
+#### 8. Painel TUI de Telemetria no Terminal (`dash` / `dashboard` / `top` / `btop`)
+Abre uma interface de terminal nativa de alta velocidade estilo **`htop` / `btop` / osciloscópio** com renderização sub-pixel em Braille Unicode, buffer duplo sem cintilação (*zero flicker*) e execução em *Alternate Screen Buffer* (`\033[?1049h`):
+```bash
+python tools/ripple_bt_cli.py dash
+# Ou especificando uma taxa BLE diferente (padrão: 50 Hz):
+python tools/ripple_bt_cli.py dash -r 20
+```
+*Aliases suportados:* `dashboard`, `dash`, `scope`, `top`, `htop`, `btop`.
+
+- **Gráficos em Tempo Real a 50 Hz:**
+  - **Dinâmica de Movimentação de Onda (Janela Fixa de 1 Minuto / 60s @ 50 Hz):** Curva contínua de oscilação da água traçada com resolução sub-pixel em caracteres Braille, linha tracejada de limiar (*Threshold*) em âmbar e destaque em vermelho em caso de alerta de queda. A grandeza é **100% adimensional** (índice relativo de energia cinética).
+  - **Perfil de Descarga da Bateria (Janela Fixa de 2 Horas / 120m @ 50 Hz):** Histórico completo de tensão ($V$) e capacidade percentual ao longo de 2 horas (buffer de 360.000 amostras) com linha de corte seguro (*Safe Cutoff* a 3.20V) e filtro IIR 80/20 contra ruído elétrico do ADC.
+- **Métricas e Sensores em Tempo Real:**
+  - Energia de onda atual, pico da sessão, limiar (*threshold*) e margem de segurança.
+  - Aceleração residual $\Delta a$ ($g$) e giroscópio ($^\circ/\text{s}$) com picos da sessão.
+  - Tensão da bateria ($V$), nível de carga com barra gráfica colorida e status.
+  - Sensor interno de temperatura ($^\circ\text{C}$), umidade relativa (% RH) e status de estanqueidade (*SEALED / WATERTIGHT* ou aviso de vazamento).
+  - Contador de eventos de queda e tempo de sessão / uptime.
+- **Console de Logs e Demultiplexação Inteligente:**
+  - O painel inferior exibe em tempo real o histórico de logs do firmware ESP-IDF e eventos BLE sem colidir nem travar a telemetria.
+- **Atalhos Rápidos de Teclado:**
+  - `[Q]` ou `[Esc]` — Sair do painel e restaurar o terminal perfeitamente (retorna direto ao prompt no shell interativo).
+  - `[R]` — Rearmar boia para monitoramento (*Rearm*).
+  - `[C]` — Iniciar calibração de água calma (*Calibrate*).
+  - `[T]` — Disparar teste de alarme de queda (*Test Alert*).
+  - `[1..5]` — Alternar taxa de stream BLE instantaneamente (`1 Hz`, `5 Hz`, `10 Hz`, `20 Hz`, `50 Hz`).
+  - `[P]` — Pausar / retomar atualização dos gráficos.
+  - `[L]` — Alternar streaming de logs do ESP-IDF (`log on` / `log off`).
+  - `[S]` — Colocar a boia em sono profundo de ultrabaixo consumo (*Deep Sleep*).
+
+---
+
+#### 9. Streaming de Logs do Sistema ESP-IDF (`log on` / `log off`)
+Permite ativar ou desativar o redirecionamento dos logs internos seriais do ESP-IDF diretamente pelo canal BLE NUS:
+```bash
+python tools/ripple_bt_cli.py log on
+python tools/ripple_bt_cli.py log off
+```
+*No shell interativo:* basta digitar `log on` ou `log off`. O demultiplexador central inteligente garante que os logs de sistema não engulam respostas a comandos como `status`.
+
+---
+
+#### 9. Envio de Comandos e Calibração (`cmd`)
 Envia comandos individuais via Nordic UART Service (NUS) e aguarda resposta JSON:
 
 - **Consultar estado atual, sensores e bateria:**
