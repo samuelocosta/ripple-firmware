@@ -25,3 +25,10 @@ sdkconfig.old
 managed_components/
 dependencies.lock
 
+# Python & CLI cache
+__pycache__/
+*.py[cod]
+.ripple_target
+.ripple_buoy
+
+
