@@ -308,7 +308,15 @@ Envia comandos individuais via Nordic UART Service (NUS) e aguarda resposta JSON
 
 ---
 
-## 5. Compilação e Gravação
+## 5. Aplicativo Mobile
+
+O ecossistema **Ripple** conta com um aplicativo móvel complementar para gerenciamento, monitoramento de telemetria e alertas:
+
+- **Repositório oficial do App:** [victor-torres05/ripple-app](https://github.com/victor-torres05/ripple-app)
+
+---
+
+## 6. Compilação e Gravação
 
 > [!TIP]
 > Consulte o guia operacional completo para agentes e desenvolvedores em [`SKILL_ESP_IDF_BUILD.md`](SKILL_ESP_IDF_BUILD.md).
