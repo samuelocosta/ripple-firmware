@@ -31,4 +31,8 @@ __pycache__/
 .ripple_target
 .ripple_buoy
 
+# Local Agent Overrides
+AGENTS.local.md
+*.local.md
+
 

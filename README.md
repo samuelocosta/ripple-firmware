@@ -96,24 +96,25 @@ pip install bleak
 
 ## 5. Compilacao e Gravacao de Firmware
 
-Para o fluxo completo de compilacao, resolucao de dependencias do ESP-IDF no Windows e comportamento do gravador USB, consulte o guia detalhado em [`SKILL_ESP_IDF_BUILD.md`](SKILL_ESP_IDF_BUILD.md).
+Para desenvolvedores e automações com agentes de IA (regras de sandbox, resolução dinâmica de ambiente e parâmetros locais), consulte o guia em [`AGENTS.md`](AGENTS.md).
 
 ### Compilar o Firmware
-```powershell
-C:\esp\v6.1\esp-idf\export.ps1; idf.py build
+Com o ambiente ESP-IDF ativo no terminal:
+```bash
+idf.py build
 ```
 
 ### Gravar via BLE OTA (Recomendado — Boia Selada)
+Para dispositivos já montados na piscina ou alimentados por bateria:
 ```bash
 python tools/ripple_bt_cli.py ota build/ripple.bin
 ```
 
-### Primeira Gravacao via USB
-Em placas virgens, a gravacao inicial e feita via cabo USB. O circuito de USB-Serial/JTAG nativo necessita de reset via RTC Watchdog para iniciar a aplicacao sem intervencao no botao fisico:
-```powershell
-C:\esp\v6.1\esp-idf\export.ps1
-idf.py -p COMx flash
-python -m esptool --chip esp32s3 -p COMx --after watchdog-reset read-mac
+### Primeira Gravacao via USB (Bancada)
+Em placas virgens ou durante montagem inicial em bancada, a gravação é feita via cabo USB. Como o circuito de USB-Serial/JTAG nativo do ESP32-S3 retém o estado de bootloader, utilize o reset via RTC Watchdog para iniciar a aplicação sem necessidade de pressionar o botão físico `RST`:
+```bash
+idf.py -p <PORTA_SERIAL> flash
+python -m esptool --chip esp32s3 -p <PORTA_SERIAL> --after watchdog-reset read-mac
 ```
 
 ---
